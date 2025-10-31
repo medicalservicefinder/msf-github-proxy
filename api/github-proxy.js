@@ -1,18 +1,15 @@
 import jwt from "jsonwebtoken";
 
-function b64url(input) {
-  return Buffer.from(input).toString("base64url");
-}
-
+// Exchange App JWT → short-lived installation token
 async function getInstallationToken(appId, installationId, pem) {
   const now = Math.floor(Date.now() / 1000);
-  const payload = { iat: now - 60, exp: now + 540, iss: appId };
-  const jwtToken = jwt.sign(payload, pem, { algorithm: "RS256" });
+  const payload = { iat: now - 60, exp: now + 9 * 60, iss: appId };
+  const appJwt = jwt.sign(payload, pem, { algorithm: "RS256" });
 
   const res = await fetch(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${jwtToken}`,
+      Authorization: `Bearer ${appJwt}`,
       Accept: "application/vnd.github+json",
       "User-Agent": "msf-github-proxy"
     }
@@ -22,7 +19,6 @@ async function getInstallationToken(appId, installationId, pem) {
   return json.token;
 }
 
-// Allow-only safeguard: "owner/repo,owner2/repo2"
 function isAllowed(owner, repo) {
   const allow = (process.env.ALLOWED_REPOS || "").split(",").map(s => s.trim());
   return allow.includes(`${owner}/${repo}`);
@@ -30,25 +26,28 @@ function isAllowed(owner, repo) {
 
 export default async function handler(req, res) {
   try {
-    const { method, url } = req;
-    const u = new URL(url, `http://${req.headers.host}`);
+    const { method } = req;
+    const u = new URL(req.url, `http://${req.headers.host}`);
     // Pattern: /api/github-proxy/repos/:owner/:repo/contents/:path
     const m = u.pathname.match(/^\/api\/github-proxy\/repos\/([^/]+)\/([^/]+)\/contents\/(.+)$/);
     if (!m) return res.status(400).json({ error: "bad_path" });
 
     const [, owner, repo, path] = m;
-    if (!isAllowed(owner, repo)) return res.status(403).json({ error: "repo_not_allowed" });
+
+    if (!isAllowed(owner, repo)) {
+      return res.status(403).json({ error: "repo_not_allowed" });
+    }
 
     const appId = process.env.GITHUB_APP_ID;
     const instId = process.env.GITHUB_INSTALLATION_ID;
     const pem = process.env.GITHUB_APP_PRIVATE_KEY;
-    if (!appId || !instId || !pem) return res.status(500).json({ error: "missing_env" });
+    if (!appId || !instId || !pem) {
+      return res.status(500).json({ error: "missing_env" });
+    }
 
     const token = await getInstallationToken(appId, instId, pem);
 
-    // Proxy GET/PUT to GitHub Contents API
     const ghUrl = new URL(`https://api.github.com/repos/${owner}/${repo}/contents/${path}`);
-    // Forward common query params (ref for GET; branch for PUT if present)
     for (const [k, v] of u.searchParams) ghUrl.searchParams.set(k, v);
 
     const headers = {
@@ -62,13 +61,19 @@ export default async function handler(req, res) {
       ghRes = await fetch(ghUrl, { headers });
     } else if (method === "PUT") {
       const body = typeof req.body === "string" ? req.body : JSON.stringify(req.body || {});
-      ghRes = await fetch(ghUrl, { method: "PUT", headers: { ...headers, "Content-Type": "application/json" }, body });
+      ghRes = await fetch(ghUrl, {
+        method: "PUT",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body
+      });
     } else {
       return res.status(405).json({ error: "method_not_allowed" });
     }
 
     const text = await ghRes.text();
-    res.status(ghRes.status).setHeader("Content-Type", ghRes.headers.get("content-type") || "application/json").send(text);
+    res.status(ghRes.status)
+       .setHeader("Content-Type", ghRes.headers.get("content-type") || "application/json")
+       .send(text);
   } catch (e) {
     res.status(500).json({ error: "proxy_error", message: String(e) });
   }

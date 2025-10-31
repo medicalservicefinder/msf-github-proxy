@@ -1,0 +1,8 @@
+{
+  "name": "msf-github-proxy",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "jsonwebtoken": "^9.0.2"
+  }
+}
